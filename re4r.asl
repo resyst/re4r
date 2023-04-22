@@ -7,6 +7,7 @@ state("re4") {}
 // KeyItemId : kXXXX
 // ChapterId : cXXXX
 // GimmickId : gXXXX
+// Manual Combo: mXXXX
 startup
 {
     settings.Add("_1", true, "Chapter 1");
@@ -15,6 +16,7 @@ startup
     settings.Add("z9D08", true, "Village");
     settings.Add("s271B", true, "Bingo");
     settings.Add("k71B6280", true, "Wooden Cog");
+    settings.Add("zA988", true, "Tunnel Exit");
     settings.Add("c52D0", true, "End");
     settings.CurrentDefaultParent = null;
 
@@ -23,6 +25,7 @@ startup
     settings.Add("s2790", true, "Merchant");
     settings.Add("k71AE580", true, "Hexagonal Emblem");
     settings.Add("zACA9", true, "Eagle Gate");
+    settings.Add("zAC4E", true, "Village Chief's Manor");
     settings.Add("c5334", true, "End");
     settings.CurrentDefaultParent = null;
 
@@ -47,6 +50,7 @@ startup
 
     settings.Add("_5", true, "Chapter 5");
     settings.CurrentDefaultParent = "_5";
+    settings.Add("m0", true, "Village");
     settings.Add("s272A", true, "Villa");
     settings.Add("c571C", true, "End");
     settings.CurrentDefaultParent = null;
@@ -56,6 +60,7 @@ startup
     settings.Add("g201102CD", true, "Quarry");
     settings.Add("s278D", true, "Chainsaw Sisters");
     settings.Add("g202202A5", true, "Crank Door");
+    settings.Add("s278E", true, "Mendez Chase");
     settings.Add("zB929", true, "Merchant Skip");
     settings.Add("c5A3C", true, "End");
     settings.CurrentDefaultParent = null;
@@ -292,6 +297,11 @@ split
     if (old.StageId != current.StageId)
     {
         Delta.Add(string.Format("z{0:X}", current.StageId));
+        
+        if (vars.ChapterId.Current == 0x56B8 && current.StageId == 0x9D08)
+        {
+            Delta.Add("m0");
+        }
     }
 
     foreach (int x in current.KeyItems)
