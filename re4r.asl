@@ -103,6 +103,7 @@ startup
     settings.Add("g200B0E52", true, "Stairway Switch");
     settings.Add("zD41C", true, "Twin Garradors");
     settings.Add("s2739", true, "Throne Room");
+    settings.Add("zD481", true, "Leaving the Depths");
     settings.Add("s273A", true, "Verdugo");
     settings.Add("g200B0BE3", false, "Elevator Button");
     settings.Add("c5E88", true, "End");
