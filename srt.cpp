@@ -2,10 +2,9 @@
 
 #include <TlHelp32.h>
 #include <d2d1_2.h>
-#include <d3d11_2.h>
+#include <d3d11.h>
 #include <dcomp.h>
 #include <dwrite.h>
-#include <dxgi1_3.h>
 
 #pragma comment(lib, "d2d1")
 #pragma comment(lib, "d3d11")
@@ -15,150 +14,99 @@
 #pragma comment(lib, "winmm")
 
 #include <algorithm>
-#include <cstdio>
+#include <memory>
 #include <vector>
 
 typedef struct {
-  ID2D1DeviceContext *d2DC;
-  IDXGISwapChain1 *dxSC;
-  IDWriteFactory *dwF;
-  IDWriteTextFormat *dwTF;
+  IDWriteFactory *dwFac;
+  IDWriteTextFormat *dwFmt;
+  IDXGISwapChain1 *sc;
+  ID2D1DeviceContext *dc;
   ID2D1SolidColorBrush *brush;
+  HWND hWnd;
   float fw, fh, w, h, b;
 } DrawData;
 
 typedef struct {
-  int curHp;
-  int maxHp;
+  int32_t curHp;
+  int32_t maxHp;
 } Enemy;
 
 typedef struct {
-  bool captured;
   HANDLE hProcess;
-  MODULEENTRY32 me;
+  byte *modAddr;
 
-  int InventoryManager;
-  int GameRankSystem;
-  int GameStatsManager;
-  int CharacterManager;
+  uint32_t InventoryManager;
+  uint32_t GameRankSystem;
+  uint32_t GameStatsManager;
+  uint32_t CharacterManager;
 
-  int ptas;
-  int gameRank;
-  int killCount;
+  int32_t ptas;
+  int32_t gameRank;
+  int32_t killCount;
   std::vector<Enemy> enemies;
 } GameData;
 
-bool initWindow(HINSTANCE hInstance, HWND &hWnd, DrawData &dd);
+bool initWindow(DrawData &dd, HINSTANCE hInstance);
 bool initHandle(GameData &gd);
-void Render(DrawData &dd, GameData &gd);
-
-template <typename T> bool ReadValue(GameData &gd, T &res, int offsets, ...) {
-  bool found = true;
-  va_list args;
-  va_start(args, offsets);
-  BYTE *p = gd.me.modBaseAddr;
-  for (int i = 0; i < offsets - 1; i++)
-    found = found && ReadProcessMemory(gd.hProcess, p + va_arg(args, int), &p,
-                                       sizeof(BYTE *), nullptr);
-  found = found && ReadProcessMemory(gd.hProcess, p + va_arg(args, int), &res,
-                                     sizeof(T), nullptr);
-  va_end(args);
-  return found;
-}
-
-bool Update(GameData &gd) {
-  bool found = true;
-  found = found && ReadValue(gd, gd.ptas, 2, gd.InventoryManager, 0x10);
-  found = found && ReadValue(gd, gd.gameRank, 2, gd.GameRankSystem, 0x10);
-  found = found &&
-          ReadValue(gd, gd.killCount, 4, gd.GameStatsManager, 0x20, 0x18, 0x14);
-  gd.enemies.clear();
-  int enemyCount = 0;
-  found =
-      found && ReadValue(gd, enemyCount, 3, gd.CharacterManager, 0xa8, 0x18);
-  for (int i = 0; i < enemyCount; i++) {
-    Enemy e{};
-    found = found && ReadValue(gd, e.maxHp, 6, gd.CharacterManager, 0xa8, 0x10,
-                               0x20 + 0x8 * i, 0x148, 0x10);
-    found = found && ReadValue(gd, e.curHp, 6, gd.CharacterManager, 0xa8, 0x10,
-                               0x20 + 0x8 * i, 0x148, 0x14);
-    if (e.curHp > 0)
-      gd.enemies.push_back(std::move(e));
-  }
-  std::sort(gd.enemies.begin(), gd.enemies.end(), [](Enemy &a, Enemy &b) {
-    int dmgA = a.maxHp - a.curHp;
-    int dmgB = b.maxHp - b.curHp;
-    return dmgA > dmgB || (dmgA == dmgB && a.maxHp > b.maxHp);
-  });
-  return found;
-}
-
-void goTop(HWND hWnd, GameData &gd) {
-  HWND hFG = GetForegroundWindow();
-  DWORD pid;
-  GetWindowThreadProcessId(hFG, &pid);
-  if (pid == gd.me.th32ProcessID) {
-    SetWindowPos(hWnd, GetWindow(hFG, GW_HWNDPREV), 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE);
-  }
-}
+bool update(GameData &gd);
+void render(DrawData &dd, GameData &gd, bool isFcs);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
                    int nCmdShow) {
-  HWND hWnd;
   DrawData dd{};
-  initWindow(hInstance, hWnd, dd);
-  ShowWindow(hWnd, nCmdShow);
+  initWindow(dd, hInstance);
+  ShowWindow(dd.hWnd, nCmdShow);
 
   GameData gd{};
-  gd.captured = false;
+  gd.hProcess = nullptr;
 
   MSG msg;
-  LARGE_INTEGER freq{};
-  QueryPerformanceFrequency(&freq);
-  LONGLONG nextAttempt = 0;
+  LARGE_INTEGER pcFrq{};
+  QueryPerformanceFrequency(&pcFrq);
+  auto style = GetWindowLongPtr(dd.hWnd, GWL_EXSTYLE);
   timeBeginPeriod(1);
   do {
-    LARGE_INTEGER frameStart{};
-    QueryPerformanceCounter(&frameStart);
-    auto frameEnd = frameStart.QuadPart + freq.QuadPart / 30;
-    if (!gd.captured && frameStart.QuadPart > nextAttempt) {
-      initHandle(gd);
-      nextAttempt = frameStart.QuadPart + freq.QuadPart;
-    }
-    if (gd.captured)
-      gd.captured = Update(gd);
+    LARGE_INTEGER t0{};
+    QueryPerformanceCounter(&t0);
+    auto t1 = t0.QuadPart + pcFrq.QuadPart / 30;
     if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
       DispatchMessage(&msg);
-    Render(dd, gd);
-    dd.dxSC->Present(0, 0);
-    goTop(hWnd, gd);
-    LARGE_INTEGER frameTime{};
-    QueryPerformanceCounter(&frameTime);
-    auto delay = 5 * (600 * (frameEnd - frameTime.QuadPart) - freq.QuadPart) /
-                 (3 * freq.QuadPart);
+    if (!update(gd))
+      initHandle(gd);
+    if (!(style & WS_EX_TRANSPARENT) != (GetForegroundWindow() == dd.hWnd)) {
+      style ^= WS_EX_TRANSPARENT;
+      SetWindowLongPtr(dd.hWnd, GWL_EXSTYLE, style);
+    }
+    render(dd, gd, !(style & WS_EX_TRANSPARENT));
+    dd.sc->Present(0, 0);
+    LARGE_INTEGER dt{};
+    QueryPerformanceCounter(&dt);
+    auto delay =
+        5 * (600 * (t1 - dt.QuadPart) - pcFrq.QuadPart) / (3 * pcFrq.QuadPart);
     if (delay > 0)
       Sleep(static_cast<DWORD>(delay));
     do {
       YieldProcessor();
-      QueryPerformanceCounter(&frameTime);
-    } while (frameTime.QuadPart < frameEnd);
+      QueryPerformanceCounter(&dt);
+    } while (dt.QuadPart < t1);
   } while (msg.message != WM_QUIT);
   timeEndPeriod(1);
 
   return 0;
 }
 
-void drawText(DrawData &dd, const D2D1_POINT_2F &p, bool isRight, bool wSeps,
-              const WCHAR *fmt, ...) {
-  WCHAR b[64];
+void drawText(DrawData &dd, const D2D1_POINT_2F &p, uint32_t flags,
+              const wchar_t *fmt, ...) {
+  wchar_t b[64];
   va_list args;
   va_start(args, fmt);
   _vsnwprintf(b, 64, fmt, args);
-  if (wSeps) {
-    WCHAR c[64]{};
-    int n = wcslen(b);
-    for (int i = 0; i < n; i++) {
+  va_end(args);
+  if (flags & 0b10) {
+    wchar_t c[64]{};
+    size_t n = wcslen(b);
+    for (size_t i = 0; i < n; i++) {
       if (i % 3 == 0)
         c[i + i / 3 - 1] = L',';
       c[i + i / 3] = b[n - 1 - i];
@@ -168,26 +116,27 @@ void drawText(DrawData &dd, const D2D1_POINT_2F &p, bool isRight, bool wSeps,
       b[i] = c[n - 1 - i];
     b[n] = L'\0';
   }
-  IDWriteTextLayout *layout;
-  dd.dwTF->SetTextAlignment(isRight ? DWRITE_TEXT_ALIGNMENT_TRAILING
-                                    : DWRITE_TEXT_ALIGNMENT_LEADING);
-  dd.dwF->CreateTextLayout(b, wcslen(b), dd.dwTF, dd.w, dd.fh, &layout);
-  dd.d2DC->DrawTextLayout(p, layout, dd.brush);
-  layout->Release();
+  IDWriteTextLayout *lyt = nullptr;
+  dd.dwFmt->SetTextAlignment((flags & 1) ? DWRITE_TEXT_ALIGNMENT_TRAILING
+                                         : DWRITE_TEXT_ALIGNMENT_LEADING);
+  dd.dwFac->CreateTextLayout(b, static_cast<uint32_t>(wcslen(b)), dd.dwFmt,
+                             dd.w, dd.fh, &lyt);
+  dd.dc->DrawTextLayout(p, lyt, dd.brush);
+  lyt->Release();
 }
 
-void Render(DrawData &dd, GameData &gd) {
-  dd.d2DC->BeginDraw();
-  dd.d2DC->Clear();
+void render(DrawData &dd, GameData &gd, bool isFcs) {
+  dd.dc->BeginDraw();
+  dd.dc->Clear();
   dd.brush->SetColor(D2D1::ColorF(0x2e3440, 0.5f));
-  dd.d2DC->FillRoundedRectangle(
+  dd.dc->FillRoundedRectangle(
       {{0.0f, 0.0f, 2.0f * dd.b + dd.w, 2.0f * dd.b + dd.h}, dd.b, dd.b},
       dd.brush);
   dd.brush->SetColor(D2D1::ColorF(0xeceff4));
-  drawText(dd, {dd.b, dd.b}, true, true, L"%d", gd.ptas);
-  drawText(dd, {dd.b, dd.b + dd.fh}, false, false, L"%d", gd.gameRank);
-  drawText(dd, {dd.b, dd.b + dd.fh}, true, false, L"%d", gd.killCount);
-  for (int i = 0; i < min(gd.enemies.size(), 5); i++) {
+  drawText(dd, {dd.b, dd.b}, 0b11, L"%d", gd.ptas);
+  drawText(dd, {dd.b, dd.b + dd.fh}, 0b00, L"%d", gd.gameRank);
+  drawText(dd, {dd.b, dd.b + dd.fh}, 0b01, L"%d", gd.killCount);
+  for (int i = 0; i < min(std::size(gd.enemies), 5); i++) {
     float bx = dd.b;
     float by = dd.b + (i + 2.3f) * dd.fh;
     float bw = 6.5f * dd.fw;
@@ -195,185 +144,247 @@ void Render(DrawData &dd, GameData &gd) {
     float r = static_cast<float>(gd.enemies[i].curHp) /
               static_cast<float>(gd.enemies[i].maxHp);
     dd.brush->SetColor(D2D1::ColorF(0xa3be8c));
-    dd.d2DC->FillRectangle({bx, by, bx + bw * r, by + bh}, dd.brush);
+    dd.dc->FillRectangle({bx, by, bx + bw * r, by + bh}, dd.brush);
     dd.brush->SetColor(D2D1::ColorF(0x4c566a));
-    dd.d2DC->DrawRectangle({bx, by, bx + bw, by + bh}, dd.brush);
+    dd.dc->DrawRectangle({bx, by, bx + bw, by + bh}, dd.brush);
     dd.brush->SetColor(D2D1::ColorF(0xeceff4));
-    drawText(dd, {dd.b, dd.b + (i + 2) * dd.fh}, true, false, L"%d",
+    drawText(dd, {dd.b, dd.b + static_cast<float>(i + 2) * dd.fh}, 0b01, L"%d",
              gd.enemies[i].curHp);
   }
-  dd.d2DC->EndDraw();
+  if (isFcs) {
+    dd.brush->SetColor(D2D1::ColorF(0x4c566a));
+    dd.dc->DrawRoundedRectangle(
+        {{0.0f, 0.0f, 2.0f * dd.b + dd.w, 2.0f * dd.b + dd.h}, dd.b, dd.b},
+        dd.brush, 2.0f);
+  }
+  dd.dc->EndDraw();
 }
 
-int SigScan(const char *p, const char *m, int ps, BYTE *t, int ts) {
-  int i = 0;
-  int j = 0;
-  while (j < ts) {
-    if ((m[i] == '?') || (static_cast<BYTE>(p[i]) == t[j])) {
-      i++;
-      j++;
-    } else {
+template <typename T>
+bool readValue(GameData &gd, T &u, std::initializer_list<uint32_t> offsets) {
+  byte *p = gd.modAddr;
+  size_t c = 0;
+  auto i = std::begin(offsets);
+  for (; i != std::prev(std::end(offsets)); i++) {
+    if (!ReadProcessMemory(gd.hProcess, p + *i, &p, 8, &c) || c != 8)
+      return false;
+  }
+  T v{};
+  if (!ReadProcessMemory(gd.hProcess, p + *i, &v, sizeof(T), &c) ||
+      c != sizeof(T))
+    return false;
+  u = v;
+  return true;
+}
+
+bool readEnemies(GameData &gd) {
+  byte *p = nullptr;
+  if (!readValue(gd, p, {gd.CharacterManager, 0xa8}))
+    return false;
+  char hdr[12]{};
+  size_t c = 0;
+  if (!ReadProcessMemory(gd.hProcess, p + 0x10, hdr, 12, &c) || c != 12)
+    return false;
+  p = *reinterpret_cast<byte **>(hdr);
+  size_t n = *reinterpret_cast<int32_t *>(hdr + 8);
+  auto a = std::make_unique<char[]>(8 * n);
+  if (!ReadProcessMemory(gd.hProcess, p + 0x20, a.get(), 8 * n, &c) ||
+      c != 8 * n)
+    return false;
+  std::vector<Enemy> enemies;
+  for (size_t i = 0; i < n; i++) {
+    p = *reinterpret_cast<byte **>(a.get() + 8 * i);
+    if (p == nullptr)
+      return false;
+    if (!ReadProcessMemory(gd.hProcess, p + 0x148, &p, 8, &c) || c != 8)
+      return false;
+    char h[8]{};
+    if (!ReadProcessMemory(gd.hProcess, p + 0x10, h, 8, &c) || c != 8)
+      return false;
+    Enemy e{};
+    e.maxHp = *reinterpret_cast<int32_t *>(h);
+    e.curHp = *reinterpret_cast<int32_t *>(h + 4);
+    if (e.maxHp > 1 && e.curHp > 0)
+      enemies.push_back(std::move(e));
+  }
+  std::stable_sort(
+      enemies.begin(), enemies.end(), [](const Enemy &a, const Enemy &b) {
+        int dmgA = a.maxHp - a.curHp;
+        int dmgB = b.maxHp - b.curHp;
+        return (dmgA != dmgB) ? (dmgA > dmgB) : (a.maxHp > b.maxHp);
+      });
+  gd.enemies = std::move(enemies);
+  return true;
+}
+
+bool update(GameData &gd) {
+  if (gd.hProcess == nullptr ||
+      WaitForSingleObject(gd.hProcess, 0) != WAIT_TIMEOUT)
+    return false;
+  readValue(gd, gd.ptas, {gd.InventoryManager, 0x10});
+  readValue(gd, gd.gameRank, {gd.GameRankSystem, 0x10});
+  readValue(gd, gd.killCount, {gd.GameStatsManager, 0x20, 0x18, 0x14});
+  readEnemies(gd);
+  return true;
+}
+
+bool sigScan(const char *p, const char *m, const char *r, uint32_t s,
+             uint32_t &o, uint32_t k) {
+  uint32_t n = static_cast<uint32_t>(strlen(m));
+  for (uint32_t i = 0, j = 0; j < s; j++) {
+    if (m[i] != '?' && p[i] != r[j]) {
+      j -= i;
       i = 0;
-      j = j - i + 1;
-    }
-    if (i == ps) {
-      return j - ps;
+    } else
+      i++;
+    if (i == n) {
+      k += j - n + 1;
+      o = *reinterpret_cast<const uint32_t *>(r + k) + k + 4;
+      return true;
     }
   }
-  return -1;
+  return false;
 }
 
 bool initHandle(GameData &gd) {
-  DWORD pid;
-  bool found;
   HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   PROCESSENTRY32 pe{};
   pe.dwSize = sizeof(PROCESSENTRY32);
-  found = false;
+  bool found = false;
   Process32First(hSnapshot, &pe);
   do {
-    if (strcmp("re4.exe", pe.szExeFile) == 0) {
-      pid = pe.th32ProcessID;
-      found = true;
-      break;
-    }
-  } while (Process32Next(hSnapshot, &pe));
+    found = !strcmp("re4.exe", pe.szExeFile);
+  } while (!found && Process32Next(hSnapshot, &pe));
   CloseHandle(hSnapshot);
   if (!found)
     return false;
-  hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
-  gd.me.dwSize = sizeof(MODULEENTRY32);
-  Module32First(hSnapshot, &gd.me);
+  MODULEENTRY32 me{};
+  me.dwSize = sizeof(MODULEENTRY32);
+  hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pe.th32ProcessID);
+  Module32First(hSnapshot, &me);
   found = false;
   do {
-    if (strcmp("re4.exe", gd.me.szModule) == 0) {
-      found = true;
-      break;
-    }
-  } while (Module32Next(hSnapshot, &gd.me));
+    found = !strcmp("re4.exe", me.szModule);
+  } while (!found && Module32Next(hSnapshot, &me));
   CloseHandle(hSnapshot);
   if (!found)
     return false;
-  gd.hProcess = OpenProcess(PROCESS_VM_READ, false, pid);
+  gd.hProcess =
+      OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION | SYNCHRONIZE,
+                  false, pe.th32ProcessID);
   if (gd.hProcess == nullptr)
     return false;
-  BYTE *mem = new BYTE[gd.me.modBaseSize];
-  found = found && ReadProcessMemory(gd.hProcess, gd.me.modBaseAddr, mem,
-                                     gd.me.modBaseSize, nullptr);
-  int x = SigScan("\x4c\x8b\xc0\x48\x8b\x15\x00\x00\x00\x00\x48\x8b\xcf\xe8",
-                  "xxxxxx????xxxx", 14, mem, gd.me.modBaseSize);
-  found = found && (x != -1);
-  gd.InventoryManager = x + 10 + *reinterpret_cast<int *>(mem + x + 6);
-  x = SigScan("\x4c\x8b\x47\x30\x48\x8b\xcd\x48\x8b\x15\x00\x00\x00\x00\xe8",
-              "xxxxxxxxxx????x", 15, mem, gd.me.modBaseSize);
-  found = found && (x != -1);
-  gd.GameRankSystem = x + 14 + *reinterpret_cast<int *>(mem + x + 10);
-  x = SigScan(
-      "\x48\x8b\xd9\x48\x8b\x15\x00\x00\x00\x00\xe8\x00\x00\x00\x00\x85\xc0",
-      "xxxxxx????x????xx", 17, mem, gd.me.modBaseSize);
-  found = found && (x != -1);
-  gd.GameStatsManager = x + 10 + *reinterpret_cast<int *>(mem + x + 6);
-  x = SigScan("\x48\x8b\xf8\x48\x8b\x15\x00\x00\x00\x00\x48\x8b\xcb\xe8",
-              "xxxxxx????xxxx", 14, mem, gd.me.modBaseSize);
-  found = found && (x != -1);
-  gd.CharacterManager = x + 10 + *reinterpret_cast<int *>(mem + x + 6);
-  delete[] mem;
-  gd.captured = found;
-  return found;
+  gd.modAddr = me.modBaseAddr;
+  auto mod = std::make_unique<char[]>(me.modBaseSize);
+  size_t c = 0;
+  if (!ReadProcessMemory(gd.hProcess, me.modBaseAddr, mod.get(), me.modBaseSize,
+                         &c) ||
+      c != me.modBaseSize)
+    return false;
+  if (!sigScan("\x4c\x8b\xc0\x48\x8b\x15\x00\x00\x00\x00\x48\x8b\xcf\xe8",
+               "xxxxxx????xxxx", mod.get(), me.modBaseSize, gd.InventoryManager,
+               6) ||
+      !sigScan("\x4c\x8b\x47\x30\x48\x8b\xcd\x48\x8b\x15\x00\x00\x00\x00\xe8",
+               "xxxxxxxxxx????x", mod.get(), me.modBaseSize, gd.GameRankSystem,
+               10) ||
+      !sigScan("\x48\x8b\xd9\x48\x8b\x15\x00\x00\x00\x00\xe8\x00\x00\x00\x00"
+               "\x85\xc0",
+               "xxxxxx????x????xx", mod.get(), me.modBaseSize,
+               gd.GameStatsManager, 6) ||
+      !sigScan("\x48\x8b\xf8\x48\x8b\x15\x00\x00\x00\x00\x48\x8b\xcb\xe8",
+               "xxxxxx????xxxx", mod.get(), me.modBaseSize, gd.CharacterManager,
+               6))
+    return false;
+  return true;
 }
 
-LRESULT MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-  switch (uMsg) {
-  case WM_NCHITTEST: {
-    LRESULT x = DefWindowProc(hWnd, uMsg, wParam, lParam);
-    return (x == HTCLIENT) ? HTCAPTION : x;
-  }
-  case WM_DESTROY:
-    PostQuitMessage(0);
-    return 0;
-  }
-  return DefWindowProc(hWnd, uMsg, wParam, lParam);
-}
-
-bool initWindow(HINSTANCE hInstance, HWND &hWnd, DrawData &dd) {
-  DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(dd.dwF),
-                      reinterpret_cast<IUnknown **>(&dd.dwF));
-  dd.dwF->CreateTextFormat(L"Verdana", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                           DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                           24.0f, L"en-us", &dd.dwTF);
-  IDWriteTextLayout *layout;
-  dd.fw = 0.0f;
-  dd.fh = 0.0f;
+bool initWindow(DrawData &dd, HINSTANCE hInstance) {
+  DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(dd.dwFac),
+                      reinterpret_cast<IUnknown **>(&dd.dwFac));
+  dd.dwFac->CreateTextFormat(
+      L"Verdana", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+      DWRITE_FONT_STRETCH_NORMAL, 24.0f, L"en-us", &dd.dwFmt);
   for (int i = 0; i < 10; i++) {
-    WCHAR s[4];
+    wchar_t s[4]{};
     _snwprintf(s, 4, L"%d", i);
-    dd.dwF->CreateTextLayout(s, wcslen(s), dd.dwTF, 300, 300, &layout);
-    DWRITE_TEXT_METRICS mets{};
-    layout->GetMetrics(&mets);
-    dd.fw = max(dd.fw, mets.width);
-    dd.fh = max(dd.fh, mets.height);
-    layout->Release();
+    IDWriteTextLayout *lyt = nullptr;
+    dd.dwFac->CreateTextLayout(s, static_cast<uint32_t>(wcslen(s)), dd.dwFmt,
+                               96.0f, 96.0f, &lyt);
+    DWRITE_TEXT_METRICS mtc{};
+    lyt->GetMetrics(&mtc);
+    dd.fw = max(dd.fw, mtc.width);
+    dd.fh = max(dd.fh, mtc.height);
+    lyt->Release();
   }
   dd.w = 12.0f * dd.fw;
   dd.h = 7.0f * dd.fh;
   dd.b = 10.0f;
   WNDCLASSEX wcx{};
   wcx.cbSize = sizeof(WNDCLASSEX);
-  wcx.lpfnWndProc = MainWndProc;
+  wcx.lpfnWndProc = [](HWND hWnd, UINT uMsg, WPARAM wParam,
+                       LPARAM lParam) -> LRESULT {
+    switch (uMsg) {
+    case WM_NCHITTEST: {
+      LRESULT x = DefWindowProc(hWnd, uMsg, wParam, lParam);
+      return (x == HTCLIENT) ? HTCAPTION : x;
+    }
+    case WM_DESTROY:
+      PostQuitMessage(0);
+      return 0;
+    }
+    return DefWindowProc(hWnd, uMsg, wParam, lParam);
+  };
   wcx.hInstance = hInstance;
-  wcx.lpszClassName = "MainWClass";
+  wcx.lpszClassName = "re4r_srt";
   RegisterClassEx(&wcx);
-  hWnd = CreateWindowEx(WS_EX_NOREDIRECTIONBITMAP, "MainWClass", "re4r srt",
-                        WS_POPUP | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT,
-                        dd.w + 2.0f * dd.b, dd.h + 2.0f * dd.b, nullptr,
-                        nullptr, hInstance, nullptr);
-  ID3D11Device *d3Device;
+  DXGI_SWAP_CHAIN_DESC1 swDsc{};
+  swDsc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  swDsc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+  swDsc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+  swDsc.BufferCount = 2;
+  swDsc.SampleDesc.Count = 1;
+  swDsc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+  swDsc.Width = static_cast<int32_t>(dd.w + 2.0f * dd.b);
+  swDsc.Height = static_cast<int32_t>(dd.h + 2.0f * dd.b);
+  dd.hWnd =
+      CreateWindowEx(WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_TOPMOST,
+                     wcx.lpszClassName, "re4r srt", WS_POPUP | WS_MINIMIZEBOX,
+                     CW_USEDEFAULT, CW_USEDEFAULT, swDsc.Width, swDsc.Height,
+                     nullptr, nullptr, hInstance, nullptr);
+  ID3D11Device *d3Dev = nullptr;
   D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
                     D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                    D3D11_SDK_VERSION, &d3Device, nullptr, nullptr);
-  IDXGIDevice *dxDevice;
-  d3Device->QueryInterface(&dxDevice);
-  IDXGIFactory2 *dxFactory;
-  CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG, __uuidof(dxFactory),
-                     reinterpret_cast<void **>(&dxFactory));
-  DXGI_SWAP_CHAIN_DESC1 desc{};
-  desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-  desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-  desc.BufferCount = 2;
-  desc.SampleDesc.Count = 1;
-  desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-  RECT rect;
-  GetClientRect(hWnd, &rect);
-  desc.Width = rect.right - rect.left;
-  desc.Height = rect.bottom - rect.top;
-  dxFactory->CreateSwapChainForComposition(dxDevice, &desc, nullptr, &dd.dxSC);
-  ID2D1Factory2 *d2Factory;
-  D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2Factory);
-  ID2D1Device1 *d2Device;
-  d2Factory->CreateDevice(dxDevice, &d2Device);
-  d2Device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dd.d2DC);
-  IDXGISurface2 *surface;
-  dd.dxSC->GetBuffer(0, __uuidof(surface), reinterpret_cast<void **>(&surface));
-  D2D1_BITMAP_PROPERTIES1 props{};
-  props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
-  props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  props.bitmapOptions =
+                    D3D11_SDK_VERSION, &d3Dev, nullptr, nullptr);
+  IDXGIDevice *dxDev = nullptr;
+  d3Dev->QueryInterface(&dxDev);
+  IDXGIFactory2 *dxFac = nullptr;
+  CreateDXGIFactory2(0, __uuidof(dxFac), reinterpret_cast<void **>(&dxFac));
+  dxFac->CreateSwapChainForComposition(dxDev, &swDsc, nullptr, &dd.sc);
+  ID2D1Factory2 *d2Fac = nullptr;
+  D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2Fac);
+  ID2D1Device1 *d2Dev = nullptr;
+  d2Fac->CreateDevice(dxDev, &d2Dev);
+  d2Dev->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dd.dc);
+  IDXGISurface2 *dxSfc = nullptr;
+  dd.sc->GetBuffer(0, __uuidof(dxSfc), reinterpret_cast<void **>(&dxSfc));
+  D2D1_BITMAP_PROPERTIES1 d2Bmp_prps{};
+  d2Bmp_prps.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+  d2Bmp_prps.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  d2Bmp_prps.bitmapOptions =
       D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
-  ID2D1Bitmap1 *bitmap;
-  dd.d2DC->CreateBitmapFromDxgiSurface(surface, props, &bitmap);
-  dd.d2DC->SetTarget(bitmap);
-  IDCompositionDevice *dcompDevice;
-  DCompositionCreateDevice(dxDevice, __uuidof(dcompDevice),
-                           reinterpret_cast<void **>(&dcompDevice));
-  IDCompositionTarget *target;
-  dcompDevice->CreateTargetForHwnd(hWnd, true, &target);
-  IDCompositionVisual *visual;
-  dcompDevice->CreateVisual(&visual);
-  visual->SetContent(dd.dxSC);
-  target->SetRoot(visual);
-  dcompDevice->Commit();
-  dd.d2DC->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &dd.brush);
-
+  ID2D1Bitmap1 *d2Bmp = nullptr;
+  dd.dc->CreateBitmapFromDxgiSurface(dxSfc, d2Bmp_prps, &d2Bmp);
+  dd.dc->SetTarget(d2Bmp);
+  IDCompositionDevice *dcDev = nullptr;
+  DCompositionCreateDevice(dxDev, __uuidof(dcDev),
+                           reinterpret_cast<void **>(&dcDev));
+  IDCompositionTarget *dcTgt = nullptr;
+  dcDev->CreateTargetForHwnd(dd.hWnd, true, &dcTgt);
+  IDCompositionVisual *dcVis = nullptr;
+  dcDev->CreateVisual(&dcVis);
+  dcVis->SetContent(dd.sc);
+  dcTgt->SetRoot(dcVis);
+  dcDev->Commit();
+  dd.dc->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &dd.brush);
   return true;
 }
