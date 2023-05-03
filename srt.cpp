@@ -30,17 +30,17 @@ typedef struct {
 typedef struct {
   int32_t curHp;
   int32_t maxHp;
+  byte *addr;
 } Enemy;
 
 typedef struct {
   HANDLE hProcess;
   byte *modAddr;
-
+  bool isFocus;
   uint32_t InventoryManager;
   uint32_t GameRankSystem;
   uint32_t GameStatsManager;
   uint32_t CharacterManager;
-
   int32_t ptas;
   int32_t gameRank;
   int32_t killCount;
@@ -50,7 +50,7 @@ typedef struct {
 bool initWindow(DrawData &dd, HINSTANCE hInstance);
 bool initHandle(GameData &gd);
 bool update(GameData &gd);
-void render(DrawData &dd, GameData &gd, bool isFcs);
+void render(DrawData &dd, GameData &gd);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
                    int nCmdShow) {
@@ -78,8 +78,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
       style ^= WS_EX_TRANSPARENT;
       SetWindowLongPtr(dd.hWnd, GWL_EXSTYLE, style);
     }
-    render(dd, gd, !(style & WS_EX_TRANSPARENT));
-    dd.sc->Present(0, 0);
+    gd.isFocus = !(style & WS_EX_TRANSPARENT);
+    render(dd, gd);
+    dd.sc->Present(1, 0);
     LARGE_INTEGER dt{};
     QueryPerformanceCounter(&dt);
     auto delay =
@@ -125,7 +126,7 @@ void drawText(DrawData &dd, const D2D1_POINT_2F &p, uint32_t flags,
   lyt->Release();
 }
 
-void render(DrawData &dd, GameData &gd, bool isFcs) {
+void render(DrawData &dd, GameData &gd) {
   dd.dc->BeginDraw();
   dd.dc->Clear();
   dd.brush->SetColor(D2D1::ColorF(0x2e3440, 0.5f));
@@ -151,7 +152,7 @@ void render(DrawData &dd, GameData &gd, bool isFcs) {
     drawText(dd, {dd.b, dd.b + static_cast<float>(i + 2) * dd.fh}, 0b01, L"%d",
              gd.enemies[i].curHp);
   }
-  if (isFcs) {
+  if (gd.isFocus) {
     dd.brush->SetColor(D2D1::ColorF(0x4c566a));
     dd.dc->DrawRoundedRectangle(
         {{0.0f, 0.0f, 2.0f * dd.b + dd.w, 2.0f * dd.b + dd.h}, dd.b, dd.b},
@@ -178,41 +179,51 @@ bool readValue(GameData &gd, T &u, std::initializer_list<uint32_t> offsets) {
 }
 
 bool readEnemies(GameData &gd) {
-  byte *p = nullptr;
-  if (!readValue(gd, p, {gd.CharacterManager, 0xa8}))
+  byte *ep = nullptr;
+  if (!readValue(gd, ep, {gd.CharacterManager, 0xa8}))
     return false;
-  char hdr[12]{};
+  char hdr[16]{};
   size_t c = 0;
-  if (!ReadProcessMemory(gd.hProcess, p + 0x10, hdr, 12, &c) || c != 12)
+  if (!ReadProcessMemory(gd.hProcess, ep + 0x10, hdr, 16, &c) || c != 16)
     return false;
-  p = *reinterpret_cast<byte **>(hdr);
-  size_t n = *reinterpret_cast<int32_t *>(hdr + 8);
-  auto a = std::make_unique<char[]>(8 * n);
-  if (!ReadProcessMemory(gd.hProcess, p + 0x20, a.get(), 8 * n, &c) ||
-      c != 8 * n)
+  byte *p0 = *reinterpret_cast<byte **>(hdr);
+  size_t n0 = *reinterpret_cast<int32_t *>(hdr + 8);
+  int32_t v0 = *reinterpret_cast<int32_t *>(hdr + 12);
+  auto a = std::make_unique<char[]>(8 * n0);
+  if (!ReadProcessMemory(gd.hProcess, p0 + 0x20, a.get(), 8 * n0, &c) ||
+      c != 8 * n0)
     return false;
   std::vector<Enemy> enemies;
-  for (size_t i = 0; i < n; i++) {
-    p = *reinterpret_cast<byte **>(a.get() + 8 * i);
-    if (p == nullptr)
-      return false;
-    if (!ReadProcessMemory(gd.hProcess, p + 0x148, &p, 8, &c) || c != 8)
+  for (size_t i = 0; i < n0; i++) {
+    Enemy e{};
+    e.addr = *reinterpret_cast<byte **>(a.get() + 8 * i);
+    byte *q = nullptr;
+    if (e.addr == nullptr ||
+        !ReadProcessMemory(gd.hProcess, e.addr + 0x148, &q, 8, &c) || c != 8)
       return false;
     char h[8]{};
-    if (!ReadProcessMemory(gd.hProcess, p + 0x10, h, 8, &c) || c != 8)
+    if (!ReadProcessMemory(gd.hProcess, q + 0x10, h, 8, &c) || c != 8)
       return false;
-    Enemy e{};
     e.maxHp = *reinterpret_cast<int32_t *>(h);
     e.curHp = *reinterpret_cast<int32_t *>(h + 4);
-    if (e.maxHp > 1 && e.curHp > 0)
-      enemies.push_back(std::move(e));
+    if (e.maxHp > 1 && e.curHp != 0)
+      enemies.push_back(e);
   }
-  std::stable_sort(
-      enemies.begin(), enemies.end(), [](const Enemy &a, const Enemy &b) {
-        int dmgA = a.maxHp - a.curHp;
-        int dmgB = b.maxHp - b.curHp;
-        return (dmgA != dmgB) ? (dmgA > dmgB) : (a.maxHp > b.maxHp);
-      });
+  std::sort(std::begin(enemies), std::end(enemies),
+            [](const Enemy &a, const Enemy &b) {
+              int32_t dmgA = a.maxHp - a.curHp;
+              int32_t dmgB = b.maxHp - b.curHp;
+              return dmgA != dmgB ? dmgA > dmgB
+                                  : (a.maxHp != b.maxHp ? a.maxHp > b.maxHp
+                                                        : a.addr < b.addr);
+            });
+  if (!ReadProcessMemory(gd.hProcess, ep + 0x10, hdr, 16, &c) || c != 16)
+    return false;
+  byte *p1 = *reinterpret_cast<byte **>(hdr);
+  size_t n1 = *reinterpret_cast<int32_t *>(hdr + 8);
+  int32_t v1 = *reinterpret_cast<int32_t *>(hdr + 12);
+  if (v0 != v1 || n0 != n1 || p0 != p1)
+    return false;
   gd.enemies = std::move(enemies);
   return true;
 }
